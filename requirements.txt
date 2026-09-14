@@ -1,0 +1,6 @@
+requests
+pandas
+numpy
+streamlit
+plotly
+urllib3<2.0
