@@ -1,0 +1,6 @@
+country_code,composite_score,credit_band,rank,model_numeric_rescaled,country_name,sp_rating,moodys_rating,fitch_rating,sp_numeric,moodys_numeric,fitch_numeric,agency_avg_numeric,gap,signal
+IDN,4.993877738165284,BB,4,9.32,Indonesia,BBB,Baa2,BBB,13,13,13,13.0,-3.68,MODEL MORE BEARISH
+MYS,4.481269982639538,BB,5,8.12,Malaysia,A-,A3,BBB+,15,15,14,14.67,-6.55,MODEL MORE BEARISH
+PHL,5.954120136584401,BBB,1,11.56,Philippines,BBB+,Baa2,BBB,14,13,13,13.33,-1.77,MODEL MORE BEARISH
+SGP,5.170294987275784,BBB,3,9.73,Singapore,AAA,Aaa,AAA,21,21,21,21.0,-11.27,MODEL MORE BEARISH
+THA,5.205418565654923,BBB,2,9.81,Thailand,BBB+,Baa1,BBB+,14,14,14,14.0,-4.19,MODEL MORE BEARISH
