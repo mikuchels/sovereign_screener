@@ -1,22 +1,20 @@
 """
-Stage 6 — Streamlit Dashboard
+Stage 6 — Streamlit Dashboard (Streamlit Cloud-safe)
 
 Run with:
     streamlit run app.py
+
+On first launch (or if data/clean_macro.csv is missing), the World Bank
+data pipeline runs automatically.
 
 Pages:
     1. Overview        — ranked table, bar chart, score evolution
     2. Country Detail  — indicator breakdown, time series, score history
     3. Comparison      — overlay two countries, radar chart, side-by-side
     4. vs Agencies     — model scores vs S&P/Moody's/Fitch, scatter, divergences
-    5. Backtest        — (Step 2) model vs S&P year-by-year with divergence chart
-    6. Radar Profiles  — (Step 5) multi-country radar with year slider
-    7. Methodology     — (Step 3) full scoring documentation
-
-Sidebar:
-    - (Step 4) Adjustable weights with live re-scoring
-    - (Step 9) Data freshness badge
-    - (Step 10) Full dataset export (CSV / Excel)
+    5. Backtest        — model vs S&P year-by-year with divergence chart
+    6. Radar Profiles  — multi-country radar with year slider
+    7. Methodology     — full scoring documentation
 """
 
 import streamlit as st
@@ -25,33 +23,239 @@ import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
 import io
+import os
 
-from config import (
-    COUNTRIES, INDICATORS, SOVEREIGN_RATINGS, RATING_TO_NUMERIC,
-    RATING_HISTORY, CREDIT_SCALE,
-)
-from scoring import (
-    compute_sub_scores,
-    compute_composite_score,
-    assign_credit_band,
-    assign_credit_numeric,
-)
+# ══════════════════════════════════════════════════════════════
+# SAFE IMPORTS — fall back gracefully if modules lack new items
+# ══════════════════════════════════════════════════════════════
+from config import COUNTRIES, INDICATORS, SOVEREIGN_RATINGS, RATING_TO_NUMERIC
+
+# Optional config items (added in later stages)
+try:
+    from config import RATING_HISTORY
+except ImportError:
+    # Year-by-year S&P rating snapshots for backtest
+    RATING_HISTORY = {
+        "SG": {
+            2005: "AAA", 2006: "AAA", 2007: "AAA", 2008: "AAA", 2009: "AAA",
+            2010: "AAA", 2011: "AAA", 2012: "AAA", 2013: "AAA", 2014: "AAA",
+            2015: "AAA", 2016: "AAA", 2017: "AAA", 2018: "AAA", 2019: "AAA",
+            2020: "AAA", 2021: "AAA", 2022: "AAA", 2023: "AAA",
+        },
+        "MY": {
+            2005: "A-", 2006: "A-", 2007: "A-", 2008: "A-", 2009: "A-",
+            2010: "A-", 2011: "A-", 2012: "A-", 2013: "A-", 2014: "A-",
+            2015: "A-", 2016: "A-", 2017: "A-", 2018: "A-", 2019: "A-",
+            2020: "A-", 2021: "A-", 2022: "A-", 2023: "A-",
+        },
+        "TH": {
+            2005: "BBB+", 2006: "BBB+", 2007: "BBB+", 2008: "BBB+",
+            2009: "BBB+", 2010: "BBB+", 2011: "A-", 2012: "A-",
+            2013: "BBB+", 2014: "BBB+", 2015: "BBB+", 2016: "BBB+",
+            2017: "BBB+", 2018: "BBB+", 2019: "BBB+", 2020: "BBB+",
+            2021: "BBB+", 2022: "BBB+", 2023: "BBB+",
+        },
+        "ID": {
+            2005: "BB-", 2006: "BB-", 2007: "BB-", 2008: "BB-", 2009: "BB",
+            2010: "BB", 2011: "BB+", 2012: "BB+", 2013: "BB+", 2014: "BB+",
+            2015: "BBB-", 2016: "BBB-", 2017: "BBB-", 2018: "BBB-",
+            2019: "BBB", 2020: "BBB", 2021: "BBB", 2022: "BBB", 2023: "BBB",
+        },
+        "PH": {
+            2005: "BB", 2006: "BB", 2007: "BB", 2008: "BB", 2009: "BB",
+            2010: "BB", 2011: "BB", 2012: "BB+", 2013: "BBB-", 2014: "BBB",
+            2015: "BBB", 2016: "BBB", 2017: "BBB", 2018: "BBB",
+            2019: "BBB+", 2020: "BBB+", 2021: "BBB+", 2022: "BBB+",
+            2023: "BBB+",
+        },
+    }
+
+try:
+    from config import CREDIT_SCALE
+except ImportError:
+    CREDIT_SCALE = [
+        (8.60, 10.0, "AAA",  21),
+        (8.10, 8.59, "AA+",  20),
+        (7.70, 8.09, "AA",   19),
+        (7.30, 7.69, "AA-",  18),
+        (6.95, 7.29, "A+",   17),
+        (6.60, 6.94, "A",    16),
+        (6.25, 6.59, "A-",   15),
+        (5.90, 6.24, "BBB+", 14),
+        (5.55, 5.89, "BBB",  13),
+        (5.20, 5.54, "BBB-", 12),
+        (4.85, 5.19, "BB+",  11),
+        (4.50, 4.84, "BB",   10),
+        (4.15, 4.49, "BB-",   9),
+        (3.80, 4.14, "B+",    8),
+        (3.45, 3.79, "B",     7),
+        (3.10, 3.44, "B-",    6),
+        (2.75, 3.09, "CCC+",  5),
+        (2.40, 2.74, "CCC",   4),
+        (2.05, 2.39, "CCC-",  3),
+        (1.50, 2.04, "CC",    2),
+        (1.00, 1.49, "C/D",   1),
+    ]
+
+# Scoring
+from scoring import compute_sub_scores, compute_composite_score, assign_credit_band
+
+try:
+    from scoring import assign_credit_numeric
+except ImportError:
+    def assign_credit_numeric(score):
+        for lo, hi, band, num in CREDIT_SCALE:
+            if lo <= score <= hi:
+                return num
+        return 1
+
+# Trends
 from trends import (
     compute_yoy_changes,
     compute_rolling_trend,
     assign_trend_flags,
-    identify_weakening_indicators,
-    identify_strengthening_indicators,
-    get_trend_summary,
 )
-from ratings import (
-    get_agency_scores,
-    compare_ratings,
-    get_backtest_df,
-    get_backtest_stats,
-    detect_rating_actions,
-)
-from data_pipeline import get_freshness_summary, get_data_freshness
+
+try:
+    from trends import identify_weakening_indicators
+except ImportError:
+    def identify_weakening_indicators(df):
+        df["weakening_indicators"] = "None"
+        return df
+
+try:
+    from trends import identify_strengthening_indicators
+except ImportError:
+    def identify_strengthening_indicators(df):
+        df["strengthening_indicators"] = "None"
+        return df
+
+try:
+    from trends import get_trend_summary
+except ImportError:
+    def get_trend_summary(df):
+        return {}
+
+# Ratings
+from ratings import get_agency_scores, compare_ratings
+
+try:
+    from ratings import get_backtest_df
+except ImportError:
+    def get_backtest_df(df):
+        """Build backtest DataFrame: model implied vs actual S&P per year."""
+        rows = []
+        for cc, history in RATING_HISTORY.items():
+            cdf = df[df["country_code"] == cc]
+            for year, rating in history.items():
+                match = cdf[cdf["year"] == year]
+                if match.empty:
+                    continue
+                row = match.iloc[0]
+                actual_num = RATING_TO_NUMERIC.get(rating)
+                model_band = row.get("credit_band", "NR")
+                model_num = RATING_TO_NUMERIC.get(model_band)
+                diff = (model_num - actual_num) if (model_num and actual_num) else None
+                rows.append({
+                    "country_code": cc,
+                    "country_name": COUNTRIES.get(cc, cc),
+                    "year": int(year),
+                    "actual_rating": rating,
+                    "actual_numeric": actual_num,
+                    "model_band": model_band,
+                    "model_numeric": model_num,
+                    "composite_score": row.get("composite_score"),
+                    "difference": diff,
+                })
+        return pd.DataFrame(rows)
+
+try:
+    from ratings import get_backtest_stats
+except ImportError:
+    def get_backtest_stats(bt_df):
+        if bt_df.empty:
+            return pd.DataFrame()
+        clean = bt_df.dropna(subset=["difference"])
+        if clean.empty:
+            return pd.DataFrame()
+        stats = []
+        for cc, grp in clean.groupby("country_code"):
+            n = len(grp)
+            stats.append({
+                "country_code": cc,
+                "country_name": COUNTRIES.get(cc, cc),
+                "n_years": n,
+                "mean_diff": grp["difference"].mean(),
+                "abs_mean_diff": grp["difference"].abs().mean(),
+                "max_abs_diff": grp["difference"].abs().max(),
+                "exact_match_pct": (grp["difference"] == 0).mean() * 100,
+                "within_1_notch_pct": (grp["difference"].abs() <= 1).mean() * 100,
+                "within_2_notch_pct": (grp["difference"].abs() <= 2).mean() * 100,
+            })
+        return pd.DataFrame(stats)
+
+try:
+    from ratings import detect_rating_actions
+except ImportError:
+    def detect_rating_actions(bt_df):
+        if bt_df.empty:
+            return pd.DataFrame()
+        rows = []
+        for cc in bt_df["country_code"].unique():
+            cdf = bt_df[bt_df["country_code"] == cc].sort_values("year")
+            prev = None
+            for _, r in cdf.iterrows():
+                if prev is not None and r["actual_rating"] != prev["actual_rating"]:
+                    act_now = RATING_TO_NUMERIC.get(r["actual_rating"], 0)
+                    act_prev = RATING_TO_NUMERIC.get(prev["actual_rating"], 0)
+                    action = "UPGRADE" if act_now > act_prev else "DOWNGRADE"
+                    model_led = False
+                    if prev.get("model_numeric") is not None and prev.get("actual_numeric") is not None:
+                        if action == "UPGRADE" and prev["model_numeric"] > prev["actual_numeric"]:
+                            model_led = True
+                        elif action == "DOWNGRADE" and prev["model_numeric"] < prev["actual_numeric"]:
+                            model_led = True
+                    rows.append({
+                        "country_code": cc,
+                        "country_name": COUNTRIES.get(cc, cc),
+                        "year": int(r["year"]),
+                        "action": action,
+                        "from_rating": prev["actual_rating"],
+                        "to_rating": r["actual_rating"],
+                        "model_band": r.get("model_band", "NR"),
+                        "model_led": model_led,
+                    })
+                prev = r
+        return pd.DataFrame(rows)
+
+# Data pipeline
+try:
+    from data_pipeline import get_freshness_summary, get_data_freshness
+except ImportError:
+    def get_freshness_summary(df):
+        summary = {}
+        for cc in df.get("country_code", pd.Series()).unique():
+            cdf = df[df["country_code"] == cc]
+            summary[cc] = int(cdf["year"].max()) if not cdf.empty else None
+        return summary
+
+    def get_data_freshness(df):
+        rows = []
+        ind_cols = [c for c in INDICATORS if c in df.columns]
+        for cc in df["country_code"].unique():
+            cdf = df[df["country_code"] == cc]
+            for col in ind_cols:
+                valid = cdf[cdf[col].notna()]
+                latest = int(valid["year"].max()) if not valid.empty else None
+                rows.append({
+                    "country_code": cc,
+                    "country_name": COUNTRIES.get(cc, cc),
+                    "indicator": col,
+                    "indicator_name": INDICATORS[col]["name"],
+                    "latest_year": latest,
+                    "is_stale": latest is not None and latest < (pd.Timestamp.now().year - 2),
+                })
+        return pd.DataFrame(rows)
 
 
 # ── Page config ────────────────────────────────────────────────
@@ -63,7 +267,103 @@ st.set_page_config(
 
 
 # ══════════════════════════════════════════════════════════════
-# SIDEBAR — Step 4: Adjustable Weights
+# AUTO-GENERATE DATA IF MISSING (Streamlit Cloud first-run)
+# ══════════════════════════════════════════════════════════════
+DATA_PATH = "data/clean_macro.csv"
+
+
+def ensure_data_exists():
+    """Run the data pipeline if the CSV hasn't been generated yet."""
+    if os.path.exists(DATA_PATH):
+        return
+
+    st.info("⏳ First run detected — fetching data from World Bank API…")
+    os.makedirs("data", exist_ok=True)
+
+    try:
+        from data_pipeline import fetch_all_indicators, clean_data
+        raw = fetch_all_indicators()
+        raw.to_csv("data/raw_macro.csv", index=False)
+        clean = clean_data(raw)
+        clean.to_csv(DATA_PATH, index=False)
+        st.success("✅ Data pipeline complete!")
+        st.rerun()
+    except ImportError:
+        # Minimal inline pipeline if data_pipeline.py is missing/broken
+        _build_data_inline()
+    except Exception as e:
+        st.error(f"Pipeline failed: {e}")
+        st.info("Attempting minimal inline fetch…")
+        _build_data_inline()
+
+
+def _build_data_inline():
+    """Minimal World Bank fetch — no external module required."""
+    import requests
+
+    country_str = ";".join(COUNTRIES.keys())
+    frames = []
+
+    progress = st.progress(0, text="Fetching indicators…")
+    indicator_list = list(INDICATORS.keys())
+    n = len(indicator_list)
+
+    for i, ind_code in enumerate(indicator_list):
+        progress.progress((i + 1) / n, text=f"Fetching {INDICATORS[ind_code]['name']}…")
+        url = (
+            f"https://api.worldbank.org/v2/country/{country_str}/"
+            f"indicator/{ind_code}?format=json&per_page=5000&date=2000:2025"
+        )
+        try:
+            resp = requests.get(url, timeout=30)
+            resp.raise_for_status()
+            data = resp.json()
+            if len(data) < 2 or data[1] is None:
+                continue
+            for entry in data[1]:
+                if entry["value"] is not None:
+                    frames.append({
+                        "country_code": entry["country"]["id"],
+                        "year": int(entry["date"]),
+                        "indicator_code": ind_code,
+                        "value": float(entry["value"]),
+                    })
+        except Exception:
+            continue
+
+    progress.empty()
+
+    if not frames:
+        st.error("❌ Could not fetch any data from World Bank.")
+        st.stop()
+
+    raw = pd.DataFrame(frames)
+    raw.to_csv("data/raw_macro.csv", index=False)
+
+    # Pivot to wide format
+    clean = raw.pivot_table(
+        index=["country_code", "year"],
+        columns="indicator_code",
+        values="value",
+    ).reset_index()
+    clean.columns.name = None
+
+    # Forward-fill gaps per country
+    clean = clean.sort_values(["country_code", "year"])
+    clean = clean.groupby("country_code").apply(
+        lambda g: g.ffill().bfill(), include_groups=False
+    ).reset_index(level=0)
+
+    clean.to_csv(DATA_PATH, index=False)
+    st.success("✅ Data fetched and saved!")
+    st.rerun()
+
+
+ensure_data_exists()
+
+
+# ══════════════════════════════════════════════════════════════
+# SIDEBAR — Adjustable Weights
 # ══════════════════════════════════════════════════════════════
 st.sidebar.title("🏦 ASEAN Sovereign Credit")
 
@@ -76,9 +376,9 @@ st.sidebar.caption(
 custom_weights = {}
 for code, meta in INDICATORS.items():
     label = meta.get("short_name", meta["name"])
-    default_w = meta["weight"]
+    default_w = meta.get("weight", 1.0 / len(INDICATORS))
     custom_weights[code] = st.sidebar.slider(
-        label, 0.0, 1.0, default_w, 0.01, key=f"w_{code}"
+        label, 0.0, 1.0, float(default_w), 0.01, key=f"w_{code}"
     )
 
 # Normalise
@@ -86,39 +386,40 @@ total_w = sum(custom_weights.values())
 if total_w > 0:
     norm_weights = {k: v / total_w for k, v in custom_weights.items()}
 else:
-    norm_weights = {k: meta["weight"] for k, meta in INDICATORS.items()}
+    norm_weights = {
+        k: meta.get("weight", 1.0 / len(INDICATORS))
+        for k, meta in INDICATORS.items()
+    }
 
-# Show effective weights
 with st.sidebar.expander("Effective weights"):
     for code, w in norm_weights.items():
         name = INDICATORS[code].get("short_name", INDICATORS[code]["name"])
         st.caption(f"{name}: **{w:.0%}**")
 
-# Check if weights differ from defaults
 weights_changed = any(
-    abs(custom_weights[c] - INDICATORS[c]["weight"]) > 0.005
+    abs(custom_weights[c] - INDICATORS[c].get("weight", 1.0 / len(INDICATORS))) > 0.005
     for c in INDICATORS
 )
 
 
 # ══════════════════════════════════════════════════════════════
-# LOAD & PROCESS DATA (cached, weight-aware)
+# LOAD & PROCESS DATA
 # ══════════════════════════════════════════════════════════════
-
 @st.cache_data
 def load_clean_data():
-    """Load the clean CSV once (independent of weights)."""
-    return pd.read_csv("data/clean_macro.csv")
+    return pd.read_csv(DATA_PATH)
 
 
-def process_data(df_clean: pd.DataFrame, weights: dict) -> pd.DataFrame:
-    """
-    Score, composite, band, trends — rerun when weights change.
-    We separate this from load_clean_data so the API fetch isn't repeated.
-    """
+def process_data(df_clean, weights):
     df = df_clean.copy()
     df = compute_sub_scores(df)
-    df = compute_composite_score(df, custom_weights=weights)
+
+    # compute_composite_score may or may not accept custom_weights
+    try:
+        df = compute_composite_score(df, custom_weights=weights)
+    except TypeError:
+        df = compute_composite_score(df)
+
     df["credit_band"] = df["composite_score"].apply(assign_credit_band)
     df["credit_numeric"] = df["composite_score"].apply(assign_credit_numeric)
     df = compute_yoy_changes(df)
@@ -130,13 +431,11 @@ def process_data(df_clean: pd.DataFrame, weights: dict) -> pd.DataFrame:
     return df
 
 
-# Create a hashable key from weights so Streamlit caches per weight config
 weight_key = tuple(sorted(norm_weights.items()))
 
 
 @st.cache_data
 def get_processed_data(_clean_df, _weight_key):
-    """Cached wrapper — re-scores only when weights change."""
     weights_dict = dict(_weight_key)
     return process_data(_clean_df, weights_dict)
 
@@ -147,7 +446,7 @@ latest_year = int(df["year"].max())
 
 
 # ══════════════════════════════════════════════════════════════
-# SIDEBAR — Step 9: Data Freshness
+# SIDEBAR — Data Freshness
 # ══════════════════════════════════════════════════════════════
 freshness = get_freshness_summary(df_clean)
 freshness_latest = max(v for v in freshness.values() if v) if freshness else "N/A"
@@ -163,7 +462,7 @@ if weights_changed:
 
 
 # ══════════════════════════════════════════════════════════════
-# SIDEBAR — Step 10: Full Dataset Export
+# SIDEBAR — Export
 # ══════════════════════════════════════════════════════════════
 st.sidebar.markdown("---")
 st.sidebar.subheader("📥 Export")
@@ -175,16 +474,13 @@ st.sidebar.download_button(
     "text/csv",
 )
 
-# Excel export (requires openpyxl)
 try:
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
         df.round(4).to_excel(writer, sheet_name="Scored Data", index=False)
-        # Add backtest sheet
         bt_df = get_backtest_df(df)
         if not bt_df.empty:
             bt_df.round(2).to_excel(writer, sheet_name="Backtest", index=False)
-        # Add comparison sheet
         try:
             comp_df = compare_ratings(df)
             comp_df.round(2).to_excel(writer, sheet_name="Agency Comparison", index=False)
@@ -196,7 +492,7 @@ try:
         "sovereign_screener.xlsx",
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
-except ImportError:
+except Exception:
     st.sidebar.caption("Install `openpyxl` for Excel export.")
 
 
@@ -218,13 +514,18 @@ page = st.sidebar.radio(
 )
 
 
+# ── Helper: width kwarg for st.dataframe ──
+# Streamlit ≥ 1.41 deprecated use_container_width in favour of width=
+def _dfw():
+    """Return the correct keyword dict for full-width dataframes."""
+    return {"width": "stretch"}
+
+
 # ================================================================
 #  PAGE 1 — OVERVIEW
 # ================================================================
 if page == "Overview":
     st.title("ASEAN Sovereign Credit Risk Scorecard")
-
-    # Step 9: Freshness badge
     st.caption(
         f"📅 Data through **{freshness_latest}** · "
         f"{len(INDICATORS)} indicators · {len(COUNTRIES)} countries"
@@ -232,7 +533,6 @@ if page == "Overview":
 
     latest = df[df["year"] == latest_year].sort_values("rank").copy()
 
-    # ── Ranked table ──
     st.subheader("Current Rankings")
 
     def _flag_label(flag):
@@ -251,9 +551,8 @@ if page == "Overview":
         })
         .set_index("Rank")
     )
-    st.dataframe(display_df, use_container_width=True)
+    st.dataframe(display_df, **_dfw())
 
-    # Step 10: Export
     st.download_button(
         "📥 Download Rankings Table",
         display_df.reset_index().to_csv(index=False),
@@ -261,7 +560,6 @@ if page == "Overview":
         "text/csv",
     )
 
-    # ── Horizontal bar chart ──
     st.subheader("Composite Scores")
     fig = px.bar(
         latest.sort_values("composite_score", ascending=True),
@@ -276,7 +574,6 @@ if page == "Overview":
     fig.update_layout(showlegend=False, height=350, coloraxis_showscale=False)
     st.plotly_chart(fig, use_container_width=True)
 
-    # ── Score evolution over time ──
     st.subheader("Score Evolution")
     fig2 = px.line(
         df, x="year", y="composite_score", color="country_name",
@@ -305,7 +602,6 @@ elif page == "Country Detail":
     cdf = df[df["country_code"] == code].sort_values("year")
     row = cdf[cdf["year"] == latest_year].iloc[0]
 
-    # ── KPI cards ──
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Score", f"{row['composite_score']:.2f}")
     c2.metric("Rank", f"#{int(row['rank'])} / {len(COUNTRIES)}")
@@ -313,7 +609,6 @@ elif page == "Country Detail":
     c4.metric("Trend", row["trend_flag"])
     st.markdown("---")
 
-    # ── Indicator scores (latest year) ──
     st.subheader(f"Indicator Scores — {COUNTRIES[code]} ({latest_year})")
     ind_data = []
     for c, meta in INDICATORS.items():
@@ -340,7 +635,6 @@ elif page == "Country Detail":
         )
         st.plotly_chart(fig, use_container_width=True)
 
-    # ── Raw indicator time series ──
     st.subheader("Indicator Time Series (Raw)")
     available = [c for c in INDICATORS if c in cdf.columns]
     sel = st.selectbox(
@@ -357,7 +651,6 @@ elif page == "Country Detail":
     fig2.update_layout(height=350)
     st.plotly_chart(fig2, use_container_width=True)
 
-    # ── Composite score history ──
     st.subheader("Composite Score History")
     fig3 = px.line(
         cdf, x="year", y="composite_score", markers=True,
@@ -366,13 +659,14 @@ elif page == "Country Detail":
     fig3.update_layout(height=300)
     st.plotly_chart(fig3, use_container_width=True)
 
-    # ── Weakening / Strengthening (latest year) ──
-    if row.get("weakening_indicators", "None") != "None":
-        st.warning(f"⚠️ **Weakening:** {row['weakening_indicators']}")
-    if row.get("strengthening_indicators", "None") != "None":
-        st.success(f"✦ **Strengthening:** {row['strengthening_indicators']}")
+    # Weakening / Strengthening callouts
+    weak = row.get("weakening_indicators", "None")
+    strong = row.get("strengthening_indicators", "None")
+    if weak and weak != "None":
+        st.warning(f"⚠️ **Weakening:** {weak}")
+    if strong and strong != "None":
+        st.success(f"✦ **Strengthening:** {strong}")
 
-    # Step 10: Export
     st.download_button(
         f"📥 Download {COUNTRIES[code]} Data",
         cdf.round(4).to_csv(index=False),
@@ -396,7 +690,8 @@ elif page == "Comparison":
     with c2:
         cb = st.selectbox(
             "Country B", list(COUNTRIES.keys()),
-            format_func=lambda x: COUNTRIES[x], index=3,
+            format_func=lambda x: COUNTRIES[x],
+            index=min(3, len(COUNTRIES) - 1),
         )
 
     da = df[df["country_code"] == ca].sort_values("year")
@@ -404,7 +699,6 @@ elif page == "Comparison":
     ra = da[da["year"] == latest_year].iloc[0]
     rb = db[db["year"] == latest_year].iloc[0]
 
-    # ── Composite overlay ──
     st.subheader("Composite Score Over Time")
     fig = go.Figure()
     fig.add_trace(go.Scatter(
@@ -418,7 +712,6 @@ elif page == "Comparison":
     fig.update_layout(height=400, yaxis_title="Score", xaxis_title="Year")
     st.plotly_chart(fig, use_container_width=True)
 
-    # ── Radar chart ──
     st.subheader(f"Indicator Breakdown ({latest_year})")
     available_ind = [c for c in INDICATORS if f"score_{c}" in ra.index]
     cats = [INDICATORS[c].get("short_name", INDICATORS[c]["name"])
@@ -443,14 +736,17 @@ elif page == "Comparison":
     )
     st.plotly_chart(fig2, use_container_width=True)
 
-    # ── Side-by-side table ──
     st.subheader("Side-by-Side (Raw + Scores)")
     rows = []
     for c, meta in INDICATORS.items():
         raw_a = f"{ra[c]:.2f}" if c in ra.index and pd.notna(ra[c]) else "N/A"
         raw_b = f"{rb[c]:.2f}" if c in rb.index and pd.notna(rb[c]) else "N/A"
-        sc_a = f"{ra[f'score_{c}']:.1f}" if f"score_{c}" in ra.index and pd.notna(ra.get(f"score_{c}")) else "N/A"
-        sc_b = f"{rb[f'score_{c}']:.1f}" if f"score_{c}" in rb.index and pd.notna(rb.get(f"score_{c}")) else "N/A"
+        sc_a = (f"{ra[f'score_{c}']:.1f}"
+                if f"score_{c}" in ra.index and pd.notna(ra.get(f"score_{c}"))
+                else "N/A")
+        sc_b = (f"{rb[f'score_{c}']:.1f}"
+                if f"score_{c}" in rb.index and pd.notna(rb.get(f"score_{c}"))
+                else "N/A")
         rows.append({
             "Indicator": meta["name"],
             f"{COUNTRIES[ca]} Raw": f"{raw_a} {meta['unit']}",
@@ -459,9 +755,8 @@ elif page == "Comparison":
             f"{COUNTRIES[cb]} Score": sc_b,
         })
     sbs_df = pd.DataFrame(rows).set_index("Indicator")
-    st.dataframe(sbs_df, use_container_width=True)
+    st.dataframe(sbs_df, **_dfw())
 
-    # Step 10: Export
     st.download_button(
         "📥 Download Comparison Table",
         sbs_df.reset_index().to_csv(index=False),
@@ -480,13 +775,11 @@ elif page == "vs Agencies":
         "scale 0–21) against the average of S&P, Moody's, and Fitch ratings."
     )
 
-    # Ensure credit_band exists
     if "credit_band" not in df.columns:
         df["credit_band"] = df["composite_score"].apply(assign_credit_band)
     comp = compare_ratings(df)
     comp = comp.sort_values("rank")
 
-    # ── Table ──
     st.subheader("Comparison Table")
     display_cols = [
         "country_name", "composite_score", "credit_band",
@@ -511,9 +804,8 @@ elif page == "vs Agencies":
         })
         .set_index("Country")
     )
-    st.dataframe(comp_display, use_container_width=True)
+    st.dataframe(comp_display, **_dfw())
 
-    # Step 10: Export
     st.download_button(
         "📥 Download Agency Comparison",
         comp_display.reset_index().to_csv(index=False),
@@ -521,7 +813,6 @@ elif page == "vs Agencies":
         "text/csv",
     )
 
-    # ── Scatter plot ──
     st.subheader("Scatter: Model vs Agency")
     fig = px.scatter(
         comp, x="agency_avg_numeric", y="model_numeric_rescaled",
@@ -531,7 +822,6 @@ elif page == "vs Agencies":
             "model_numeric_rescaled": "Model (rescaled)",
         },
     )
-    # 45-degree reference line
     mx = max(
         comp["agency_avg_numeric"].max(),
         comp["model_numeric_rescaled"].max(),
@@ -553,10 +843,9 @@ elif page == "vs Agencies":
         "Below → model more bearish."
     )
 
-    # ── Divergence commentary ──
     st.subheader("Divergence Notes")
     for _, r in comp.iterrows():
-        if r["signal"] != "ALIGNED":
+        if r.get("signal") and r["signal"] != "ALIGNED":
             direction = "more bullish" if r["gap"] > 0 else "more bearish"
             st.markdown(
                 f"**{r['country_name']}** — Model is **{direction}** than agencies "
@@ -577,7 +866,7 @@ elif page == "vs Agencies":
 
 
 # ================================================================
-#  PAGE 5 — BACKTEST  (Step 2)
+#  PAGE 5 — BACKTEST
 # ================================================================
 elif page == "🕐 Backtest":
     st.title("🕐 Backtest: Model vs S&P Over Time")
@@ -593,13 +882,13 @@ elif page == "🕐 Backtest":
         st.warning(
             "No overlapping years between model data and RATING_HISTORY.  \n"
             f"Model data range: {df['year'].min()}–{df['year'].max()}.  \n"
-            "Ensure `START_YEAR` in config.py is ≤ 2005."
+            "Ensure your data covers 2005–2023."
         )
     else:
-        # Country selector
+        bt_countries = [c for c in RATING_HISTORY if c in COUNTRIES]
         bt_country = st.selectbox(
             "Country",
-            list(RATING_HISTORY.keys()),
+            bt_countries,
             format_func=lambda x: COUNTRIES.get(x, x),
             key="bt_country",
         )
@@ -610,9 +899,7 @@ elif page == "🕐 Backtest":
         if bt.empty:
             st.info("No backtest data for this country.")
         else:
-            # ── Dual-line chart ──
             fig = go.Figure()
-
             fig.add_trace(go.Scatter(
                 x=bt["year"], y=bt["model_numeric"],
                 mode="lines+markers",
@@ -628,28 +915,23 @@ elif page == "🕐 Backtest":
                 marker=dict(size=8, symbol="diamond"),
             ))
 
-            # Y-axis → rating labels
-            num_to_rating = {v: k for k, v in RATING_TO_NUMERIC.items()
-                            if not k[0].isupper() or k == k.upper()
-                            or "a" not in k.lower()
-                            or k in ["AAA","AA+","AA","AA-","A+","A","A-",
-                                     "BBB+","BBB","BBB-","BB+","BB","BB-",
-                                     "B+","B","B-","CCC+","CCC","CCC-","CC","C","D"]}
-            # Simpler: use S&P scale only
+            # Build S&P-only numeric→label map
             sp_map = {}
             for k, v in RATING_TO_NUMERIC.items():
-                # Skip Moody's names (contain lowercase)
-                if k == k.upper() or k in ["D", "C"]:
+                if k == k.upper() or k in ("D", "C"):
                     sp_map[v] = k
 
             all_nums = sorted(set(
                 bt["model_numeric"].dropna().tolist()
                 + bt["actual_numeric"].dropna().tolist()
             ))
-            lo = max(int(min(all_nums)) - 2, 0)
-            hi = int(max(all_nums)) + 2
-            tvals = list(range(lo, hi + 1))
-            ttext = [sp_map.get(v, "") for v in tvals]
+            if all_nums:
+                lo = max(int(min(all_nums)) - 2, 0)
+                hi = int(max(all_nums)) + 2
+                tvals = list(range(lo, hi + 1))
+                ttext = [sp_map.get(v, "") for v in tvals]
+            else:
+                tvals, ttext = [], []
 
             fig.update_layout(
                 title=f"Backtest — {COUNTRIES.get(bt_country, bt_country)}",
@@ -662,7 +944,6 @@ elif page == "🕐 Backtest":
             )
             st.plotly_chart(fig, use_container_width=True)
 
-            # ── Metrics row ──
             clean_bt = bt.dropna(subset=["difference"])
             if not clean_bt.empty:
                 worst = clean_bt.loc[clean_bt["difference"].abs().idxmax()]
@@ -674,11 +955,11 @@ elif page == "🕐 Backtest":
                 )
                 m3.metric("Latest model band", clean_bt.iloc[-1]["model_band"])
 
-            # ── Rating actions table ──
             events_df = detect_rating_actions(backtest_df)
-            country_events = events_df[
-                events_df["country_code"] == bt_country
-            ] if not events_df.empty else pd.DataFrame()
+            country_events = (
+                events_df[events_df["country_code"] == bt_country]
+                if not events_df.empty else pd.DataFrame()
+            )
 
             if not country_events.empty:
                 st.subheader("Rating Actions & Model Signal")
@@ -695,20 +976,22 @@ elif page == "🕐 Backtest":
                         "model_led": "Model Led?",
                     }),
                     hide_index=True,
-                    use_container_width=True,
+                    **_dfw(),
                 )
 
-            # ── Full table (expandable) ──
             with st.expander("📋 Full Backtest Table"):
+                display_cols_bt = [c for c in
+                    ["year", "actual_rating", "actual_numeric",
+                     "model_band", "model_numeric", "composite_score",
+                     "difference"]
+                    if c in bt.columns
+                ]
                 st.dataframe(
-                    bt[["year", "actual_rating", "actual_numeric",
-                        "model_band", "model_numeric", "composite_score",
-                        "difference"]].round(2),
+                    bt[display_cols_bt].round(2),
                     hide_index=True,
-                    use_container_width=True,
+                    **_dfw(),
                 )
 
-        # ── Cross-country accuracy stats ──
         st.markdown("---")
         st.subheader("Cross-Country Accuracy Summary")
         stats_df = get_backtest_stats(backtest_df)
@@ -725,10 +1008,9 @@ elif page == "🕐 Backtest":
                     "within_2_notch_pct": "Within 2 %",
                 }).drop(columns=["country_code"], errors="ignore"),
                 hide_index=True,
-                use_container_width=True,
+                **_dfw(),
             )
 
-        # Step 10: Export
         st.download_button(
             "📥 Download Backtest Data",
             backtest_df.round(2).to_csv(index=False),
@@ -738,7 +1020,7 @@ elif page == "🕐 Backtest":
 
 
 # ================================================================
-#  PAGE 6 — RADAR PROFILES  (Step 5)
+#  PAGE 6 — RADAR PROFILES
 # ================================================================
 elif page == "🕸️ Radar Profiles":
     st.title("🕸️ Country Risk Profiles")
@@ -747,7 +1029,6 @@ elif page == "🕸️ Radar Profiles":
         "**Larger area = stronger credit profile.**"
     )
 
-    # ── Controls ──
     radar_countries = st.multiselect(
         "Countries",
         list(COUNTRIES.keys()),
@@ -756,13 +1037,13 @@ elif page == "🕸️ Radar Profiles":
     )
 
     avail_years = sorted(df["year"].dropna().unique())
+    avail_years_int = [int(y) for y in avail_years]
     radar_year = st.select_slider(
         "Year",
-        options=[int(y) for y in avail_years],
-        value=int(avail_years[-1]),
+        options=avail_years_int,
+        value=avail_years_int[-1],
     )
 
-    # ── Build radar ──
     available_ind = [c for c in INDICATORS if f"score_{c}" in df.columns]
     theta = [INDICATORS[c].get("short_name", INDICATORS[c]["name"])
              for c in available_ind]
@@ -802,7 +1083,6 @@ elif page == "🕸️ Radar Profiles":
     )
     st.plotly_chart(fig, use_container_width=True)
 
-    # ── Score breakdown table ──
     with st.expander("📋 Score Breakdown"):
         bd = []
         for country in radar_countries:
@@ -815,22 +1095,25 @@ elif page == "🕸️ Radar Profiles":
             d = {"Country": COUNTRIES[country]}
             for c in available_ind:
                 label = INDICATORS[c].get("short_name", INDICATORS[c]["name"])
-                d[label] = round(row[f"score_{c}"], 2) if pd.notna(row.get(f"score_{c}")) else None
-            d["Composite"] = round(row["composite_score"], 2) if pd.notna(row.get("composite_score")) else None
+                d[label] = (round(row[f"score_{c}"], 2)
+                            if pd.notna(row.get(f"score_{c}")) else None)
+            d["Composite"] = (round(row["composite_score"], 2)
+                              if pd.notna(row.get("composite_score")) else None)
             d["Band"] = row.get("credit_band", "NR")
             bd.append(d)
         if bd:
-            st.dataframe(pd.DataFrame(bd), hide_index=True, use_container_width=True)
+            st.dataframe(pd.DataFrame(bd), hide_index=True, **_dfw())
 
-    # ── Year-over-year radar animation ──
     st.subheader("Year-over-Year Shift")
     st.caption("Compare the same country across two years to see what moved.")
 
     yr1, yr2 = st.columns(2)
     with yr1:
-        yoy_y1 = st.selectbox("Year 1", avail_years, index=max(0, len(avail_years)-2))
+        yoy_y1 = st.selectbox("Year 1", avail_years_int,
+                               index=max(0, len(avail_years_int) - 2))
     with yr2:
-        yoy_y2 = st.selectbox("Year 2", avail_years, index=len(avail_years)-1)
+        yoy_y2 = st.selectbox("Year 2", avail_years_int,
+                               index=len(avail_years_int) - 1)
     yoy_country = st.selectbox(
         "Country",
         list(COUNTRIES.keys()),
@@ -1024,3 +1307,4 @@ elif page == "📖 Methodology":
             f"⚠️ {len(stale)} indicator-country pairs have data older than "
             f"2 years. These may affect scoring accuracy."
         )
+
